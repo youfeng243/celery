@@ -2,13 +2,12 @@ from __future__ import absolute_import, unicode_literals
 
 import logging
 import os
-import pytest
 import sys
 import threading
 import warnings
-
 from importlib import import_module
 
+import pytest
 from case import Mock
 from case.utils import decorator
 from kombu import Queue
@@ -17,18 +16,17 @@ from celery.backends.cache import CacheBackend, DummyClient
 # we have to import the pytest plugin fixtures here,
 # in case user did not do the `python setup.py develop` yet,
 # that installs the pytest plugin into the setuptools registry.
-from celery.contrib.pytest import (
-    celery_app, celery_enable_logging, depends_on_current_app,
-)
-from celery.contrib.testing.app import Trap, TestApp
-from celery.contrib.testing.mocks import (
-    TaskMessage, TaskMessage1, task_message_from_sig,
-)
+from celery.contrib.pytest import (celery_app, celery_enable_logging,
+                                   celery_parameters, depends_on_current_app)
+from celery.contrib.testing.app import TestApp, Trap
+from celery.contrib.testing.mocks import (TaskMessage, TaskMessage1,
+                                          task_message_from_sig)
 
 # Tricks flake8 into silencing redefining fixtures warnings.
-__all__ = [
+__all__ = (
     'celery_app', 'celery_enable_logging', 'depends_on_current_app',
-]
+    'celery_parameters'
+)
 
 try:
     WindowsError = WindowsError  # noqa
@@ -48,8 +46,10 @@ CASE_LOG_HANDLER_EFFECT = 'Test {0} modified handlers for the root logger'
 def celery_config():
     return {
         'broker_url': 'memory://',
+        'broker_transport_options': {
+            'polling_interval': 0.1
+        },
         'result_backend': 'cache+memory://',
-
         'task_default_queue': 'testcelery',
         'task_default_exchange': 'testcelery',
         'task_default_routing_key': 'testcelery',
@@ -230,9 +230,11 @@ def sanity_stdouts(request):
 
 @pytest.fixture(autouse=True)
 def sanity_logging_side_effects(request):
+    from _pytest.logging import LogCaptureHandler
     root = logging.getLogger()
     rootlevel = root.level
-    roothandlers = root.handlers
+    roothandlers = [
+        x for x in root.handlers if not isinstance(x, LogCaptureHandler)]
 
     yield
 
@@ -240,7 +242,9 @@ def sanity_logging_side_effects(request):
     root_now = logging.getLogger()
     if root_now.level != rootlevel:
         raise RuntimeError(CASE_LOG_LEVEL_EFFECT.format(this))
-    if root_now.handlers != roothandlers:
+    newhandlers = [x for x in root_now.handlers if not isinstance(
+        x, LogCaptureHandler)]
+    if newhandlers != roothandlers:
         raise RuntimeError(CASE_LOG_HANDLER_EFFECT.format(this))
 
 

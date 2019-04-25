@@ -18,8 +18,7 @@ from __future__ import absolute_import, unicode_literals
 import bisect
 import sys
 import threading
-
-from collections import Callable, defaultdict
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 from itertools import islice
@@ -35,7 +34,14 @@ from celery.five import items, python_2_unicode_compatible, values
 from celery.utils.functional import LRUCache, memoize, pass1
 from celery.utils.log import get_logger
 
-__all__ = ['Worker', 'Task', 'State', 'heartbeat_expires']
+try:
+    from collections.abc import Callable
+except ImportError:
+    # TODO: Remove this when we drop Python 2.7 support
+    from collections import Callable
+
+
+__all__ = ('Worker', 'Task', 'State', 'heartbeat_expires')
 
 # pylint: disable=redefined-outer-name
 # We cache globals and attribute lookups, so disable this warning.
@@ -101,6 +107,8 @@ class CallableDefaultdict(defaultdict):
 
     def __call__(self, *args, **kwargs):
         return self.fun(*args, **kwargs)
+
+
 Callable.register(CallableDefaultdict)  # noqa: E305
 
 
@@ -279,7 +287,7 @@ class Task(object):
     merge_rules = {
         states.RECEIVED: (
             'name', 'args', 'kwargs', 'parent_id',
-            'root_id' 'retries', 'eta', 'expires',
+            'root_id', 'retries', 'eta', 'expires',
         ),
     }
 
@@ -293,11 +301,14 @@ class Task(object):
     def __init__(self, uuid=None, cluster_state=None, children=None, **kwargs):
         self.uuid = uuid
         self.cluster_state = cluster_state
-        self.children = WeakSet(
-            self.cluster_state.tasks.get(task_id)
-            for task_id in children or ()
-            if task_id in self.cluster_state.tasks
-        )
+        if self.cluster_state is not None:
+            self.children = WeakSet(
+                self.cluster_state.tasks.get(task_id)
+                for task_id in children or ()
+                if task_id in self.cluster_state.tasks
+            )
+        else:
+            self.children = WeakSet()
         self._serializer_handlers = {
             'children': self._serializable_children,
             'root': self._serializable_root,
@@ -384,11 +395,19 @@ class Task(object):
 
     @cached_property
     def parent(self):
-        return self.parent_id and self.cluster_state.tasks[self.parent_id]
+        # issue github.com/mher/flower/issues/648
+        try:
+            return self.parent_id and self.cluster_state.tasks[self.parent_id]
+        except KeyError:
+            return None
 
     @cached_property
     def root(self):
-        return self.root_id and self.cluster_state.tasks[self.root_id]
+        # issue github.com/mher/flower/issues/648
+        try:
+            return self.root_id and self.cluster_state.tasks[self.root_id]
+        except KeyError:
+            return None
 
 
 class State(object):

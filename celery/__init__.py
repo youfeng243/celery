@@ -12,9 +12,9 @@ import re
 import sys
 from collections import namedtuple
 
-SERIES = 'latentcall'
+SERIES = 'rhubarb'
 
-__version__ = '4.0.0'
+__version__ = '4.3.0'
 __author__ = 'Ask Solem'
 __contact__ = 'ask@celeryproject.org'
 __homepage__ = 'http://celeryproject.org'
@@ -23,12 +23,12 @@ __keywords__ = 'task job queue distributed messaging actor'
 
 # -eof meta-
 
-__all__ = [
+__all__ = (
     'Celery', 'bugreport', 'shared_task', 'task',
     'current_app', 'current_task', 'maybe_signature',
     'chain', 'chord', 'chunks', 'group', 'signature',
     'xmap', 'xstarmap', 'uuid',
-]
+)
 
 VERSION_BANNER = '{0} ({1})'.format(__version__, SERIES)
 
@@ -118,10 +118,8 @@ def _patch_gevent():
         _signal.signal = gevent_signal
 
 
-def maybe_patch_concurrency(argv=sys.argv,
-                            short_opts=['-P'], long_opts=['--pool'],
-                            patches={'eventlet': _patch_eventlet,
-                                     'gevent': _patch_gevent}):
+def maybe_patch_concurrency(argv=None, short_opts=None,
+                            long_opts=None, patches=None):
     """Apply eventlet/gevent monkeypatches.
 
     With short and long opt alternatives that specify the command line
@@ -129,6 +127,11 @@ def maybe_patch_concurrency(argv=sys.argv,
     to be patched is completed as early as possible.
     (e.g., eventlet/gevent monkey patches).
     """
+    argv = argv if argv else sys.argv
+    short_opts = short_opts if short_opts else ['-P']
+    long_opts = long_opts if long_opts else ['--pool']
+    patches = patches if patches else {'eventlet': _patch_eventlet,
+                                       'gevent': _patch_gevent}
     try:
         pool = _find_option_with_arg(argv, short_opts, long_opts)
     except KeyError:
@@ -144,6 +147,7 @@ def maybe_patch_concurrency(argv=sys.argv,
         # set up eventlet/gevent environments ASAP
         from celery import concurrency
         concurrency.get_implementation(pool)
+
 
 # Lazy loading
 from . import local  # noqa

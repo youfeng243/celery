@@ -5,8 +5,8 @@ from __future__ import absolute_import, unicode_literals
 import os
 import threading
 import warnings
-
 from collections import defaultdict, deque
+from datetime import datetime
 from operator import attrgetter
 
 from kombu import pools
@@ -18,44 +18,37 @@ from kombu.utils.uuid import uuid
 from vine import starpromise
 from vine.utils import wraps
 
-from celery import platforms
-from celery import signals
-from celery._state import (
-    _task_stack, get_current_app, _set_current_app, set_default_app,
-    _register_app, _deregister_app,
-    get_current_worker_task, connect_on_app_finalize,
-    _announce_app_finalized,
-)
+from celery import platforms, signals
+from celery._state import (_announce_app_finalized, _deregister_app,
+                           _register_app, _set_current_app, _task_stack,
+                           connect_on_app_finalize, get_current_app,
+                           get_current_worker_task, set_default_app)
 from celery.exceptions import AlwaysEagerIgnored, ImproperlyConfigured
-from celery.five import (
-    UserDict, bytes_if_py2, python_2_unicode_compatible, values,
-)
+from celery.five import (UserDict, bytes_if_py2, python_2_unicode_compatible,
+                         values)
 from celery.loaders import get_loader_cls
 from celery.local import PromiseProxy, maybe_evaluate
 from celery.utils import abstract
 from celery.utils.collections import AttributeDictMixin
 from celery.utils.dispatch import Signal
-from celery.utils.functional import first, maybe_list, head_from_fun
-from celery.utils.time import timezone
+from celery.utils.functional import first, head_from_fun, maybe_list
 from celery.utils.imports import gen_task_name, instantiate, symbol_by_name
 from celery.utils.log import get_logger
 from celery.utils.objects import FallbackContext, mro_lookup
-
-from .annotations import prepare as prepare_annotations
-from . import backends
-from .defaults import find_deprecated_settings
-from .registry import TaskRegistry
-from .utils import (
-    AppPickler, Settings,
-    bugreport, _unpickle_app, _unpickle_app_v2,
-    _old_key_to_new, _new_key_to_old,
-    appstr, detect_settings,
-)
+from celery.utils.time import (get_exponential_backoff_interval, timezone,
+                               to_utc)
 
 # Load all builtin tasks
 from . import builtins  # noqa
+from . import backends
+from .annotations import prepare as prepare_annotations
+from .defaults import DEFAULT_SECURITY_DIGEST, find_deprecated_settings
+from .registry import TaskRegistry
+from .utils import (AppPickler, Settings, _new_key_to_old, _old_key_to_new,
+                    _unpickle_app, _unpickle_app_v2, appstr, bugreport,
+                    detect_settings)
 
-__all__ = ['Celery']
+__all__ = ('Celery',)
 
 logger = get_logger(__name__)
 
@@ -158,8 +151,9 @@ class Celery(object):
 
     Keyword Arguments:
         broker (str): URL of the default broker used.
-        backend (Union[str, type]): The result store backend class,
-            or the name of the backend class to use.
+        backend (Union[str, Type[celery.backends.base.Backend]]):
+            The result store backend class, or the name of the backend
+            class to use.
 
             Default is the value of the :setting:`result_backend` setting.
         autofinalize (bool): If set to False a :exc:`RuntimeError`
@@ -168,16 +162,18 @@ class Celery(object):
         set_as_current (bool):  Make this the global current app.
         include (List[str]): List of modules every worker should import.
 
-        amqp (Union[str, type]): AMQP object or class name.
-        events (Union[str, type]): Events object or class name.
-        log (Union[str, type]): Log object or class name.
-        control (Union[str, type]): Control object or class name.
-        tasks (Union[str, type]): A task registry, or the name of
+        amqp (Union[str, Type[AMQP]]): AMQP object or class name.
+        events (Union[str, Type[celery.app.events.Events]]): Events object or
+            class name.
+        log (Union[str, Type[Logging]]): Log object or class name.
+        control (Union[str, Type[celery.app.control.Control]]): Control object
+            or class name.
+        tasks (Union[str, Type[TaskRegistry]]): A task registry, or the name of
             a registry class.
         fixups (List[str]): List of fix-up plug-ins (e.g., see
             :mod:`celery.fixups.django`).
-        config_source (Union[str, type]): Take configuration from a class,
-            or object.  Attributes may include any setings described in
+        config_source (Union[str, class]): Take configuration from a class,
+            or object.  Attributes may include any settings described in
             the documentation.
     """
 
@@ -210,7 +206,7 @@ class Celery(object):
     log_cls = 'celery.app.log:Logging'
     control_cls = 'celery.app.control:Control'
     task_cls = 'celery.app.task:Task'
-    registry_cls = TaskRegistry
+    registry_cls = 'celery.app.registry:TaskRegistry'
 
     _fixups = None
     _pool = None
@@ -261,7 +257,7 @@ class Celery(object):
         self._pending = deque()
         self._tasks = tasks
         if not isinstance(self._tasks, TaskRegistry):
-            self._tasks = TaskRegistry(self._tasks or {})
+            self._tasks = self.registry_cls(self._tasks or {})
 
         # If the class defines a custom __reduce_args__ we need to use
         # the old way of pickling apps: pickling a list of
@@ -275,6 +271,8 @@ class Celery(object):
         self.__autoset('broker_url', broker)
         self.__autoset('result_backend', backend)
         self.__autoset('include', include)
+        self.__autoset('broker_use_ssl', kwargs.get('broker_use_ssl'))
+        self.__autoset('redis_backend_use_ssl', kwargs.get('redis_backend_use_ssl'))
         self._conf = Settings(
             PendingConfiguration(
                 self._preconf, self._finalize_pending_conf),
@@ -314,7 +312,6 @@ class Celery(object):
 
     def on_init(self):
         """Optional callback called at init."""
-        pass
 
     def __autoset(self, key, value):
         if value:
@@ -404,7 +401,7 @@ class Celery(object):
             return shared_task(*args, lazy=False, **opts)
 
         def inner_create_task_cls(shared=True, filter=None, lazy=True, **opts):
-            _filt = filter  # stupid 2to3
+            _filt = filter
 
             def _create_task_cls(fun):
                 if shared:
@@ -463,6 +460,9 @@ class Celery(object):
 
             autoretry_for = tuple(options.get('autoretry_for', ()))
             retry_kwargs = options.get('retry_kwargs', {})
+            retry_backoff = int(options.get('retry_backoff', False))
+            retry_backoff_max = int(options.get('retry_backoff_max', 600))
+            retry_jitter = options.get('retry_jitter', True)
 
             if autoretry_for and not hasattr(task, '_orig_run'):
 
@@ -471,11 +471,35 @@ class Celery(object):
                     try:
                         return task._orig_run(*args, **kwargs)
                     except autoretry_for as exc:
+                        if retry_backoff:
+                            retry_kwargs['countdown'] = \
+                                get_exponential_backoff_interval(
+                                    factor=retry_backoff,
+                                    retries=task.request.retries,
+                                    maximum=retry_backoff_max,
+                                    full_jitter=retry_jitter)
                         raise task.retry(exc=exc, **retry_kwargs)
 
                 task._orig_run, task.run = task.run, run
         else:
             task = self._tasks[name]
+        return task
+
+    def register_task(self, task):
+        """Utility for registering a task-based class.
+
+        Note:
+            This is here for compatibility with old Celery 1.0
+            style task classes, you should not need to use this for
+            new projects.
+        """
+        if not task.name:
+            task_cls = type(task)
+            task.name = self.gen_task_name(
+                task_cls.__name__, task_cls.__module__)
+        self.tasks[task.name] = task
+        task._app = self
+        task.bind(self)
         return task
 
     def gen_task_name(self, name, module):
@@ -575,7 +599,8 @@ class Celery(object):
         )
 
     def setup_security(self, allowed_serializers=None, key=None, cert=None,
-                       store=None, digest='sha1', serializer='json'):
+                       store=None, digest=DEFAULT_SECURITY_DIGEST,
+                       serializer='json'):
         """Setup the message-signing serializer.
 
         This will affect all application instances (a global operation).
@@ -594,7 +619,7 @@ class Celery(object):
             store (str): Directory containing certificates.
                 Defaults to the :setting:`security_cert_store` setting.
             digest (str): Digest algorithm used when signing messages.
-                Default is ``sha1``.
+                Default is ``sha256``.
             serializer (str): Serializer used to encode messages after
                 they've been signed.  See :setting:`task_serializer` for
                 the serializers supported.  Default is ``json``.
@@ -627,7 +652,7 @@ class Celery(object):
             baz/__init__.py
                 models.py
 
-        Then calling ``app.autodiscover_tasks(['foo', bar', 'baz'])`` will
+        Then calling ``app.autodiscover_tasks(['foo', 'bar', 'baz'])`` will
         result in the modules ``foo.tasks`` and ``bar.tasks`` being imported.
 
         Arguments:
@@ -636,7 +661,8 @@ class Celery(object):
                 value returned is used (for lazy evaluation).
             related_name (str): The name of the module to find.  Defaults
                 to "tasks": meaning "look for 'module.tasks' for every
-                module in ``packages``."
+                module in ``packages``.".  If ``None`` will only try to import
+                the package, i.e. "look for 'module'".
             force (bool): By default this call is lazy so that the actual
                 auto-discovery won't happen until an application imports
                 the default modules.  Forcing will cause the auto-discovery
@@ -680,7 +706,7 @@ class Celery(object):
 
         Arguments:
             name (str): Name of task to call (e.g., `"tasks.add"`).
-            result_cls (~@AsyncResult): Specify custom result class.
+            result_cls (AsyncResult): Specify custom result class.
         """
         parent = have_parent = None
         amqp = self.amqp
@@ -692,6 +718,8 @@ class Celery(object):
             warnings.warn(AlwaysEagerIgnored(
                 'task_always_eager has no effect on send_task',
             ), stacklevel=2)
+
+        ignored_result = options.pop('ignore_result', False)
         options = router.route(
             options, route_name or name, args, kwargs, task_type)
 
@@ -703,6 +731,10 @@ class Celery(object):
                 if not parent_id:
                     parent_id = parent.request.id
 
+                if conf.task_inherit_parent_priority:
+                    options.setdefault('priority',
+                                       parent.request.delivery_info.get('priority'))
+
         message = amqp.create_task_message(
             task_id, name, args, kwargs, countdown, eta, group_id,
             expires, retries, chord,
@@ -710,15 +742,24 @@ class Celery(object):
             reply_to or self.oid, time_limit, soft_time_limit,
             self.conf.task_send_sent_event,
             root_id, parent_id, shadow, chain,
+            argsrepr=options.get('argsrepr'),
+            kwargsrepr=options.get('kwargsrepr'),
         )
 
         if connection:
             producer = amqp.Producer(connection, auto_declare=False)
+
         with self.producer_or_acquire(producer) as P:
             with P.connection._reraise_as_library_errors():
-                self.backend.on_task_call(P, task_id)
+                if not ignored_result:
+                    self.backend.on_task_call(P, task_id)
                 amqp.send_task_message(P, name, message, **options)
         result = (result_cls or self.AsyncResult)(task_id)
+        # We avoid using the constructor since a custom result class
+        # can be used, in which case the constructor may still use
+        # the old signature.
+        result.ignored = ignored_result
+
         if add_to_parent:
             if not have_parent:
                 parent, have_parent = self.current_worker_task, True
@@ -799,7 +840,7 @@ class Celery(object):
             port or conf.broker_port,
             transport=transport or conf.broker_transport,
             ssl=self.either('broker_use_ssl', ssl),
-            heartbeat=heartbeat,
+            heartbeat=heartbeat or self.conf.broker_heartbeat,
             login_method=login_method or conf.broker_login_method,
             failover_strategy=(
                 failover_strategy or conf.broker_failover_strategy
@@ -853,7 +894,8 @@ class Celery(object):
 
     def now(self):
         """Return the current time and date as a datetime."""
-        return self.loader.now(utc=self.conf.enable_utc)
+        now_in_utc = to_utc(datetime.utcnow())
+        return now_in_utc.astimezone(self.timezone)
 
     def select_queues(self, queues=None):
         """Select subset of queues.
@@ -1214,6 +1256,10 @@ class Celery(object):
     def producer_pool(self):
         return self.amqp.producer_pool
 
+    def uses_utc_timezone(self):
+        """Check if the application uses the UTC timezone."""
+        return self.timezone == timezone.utc
+
     @cached_property
     def timezone(self):
         """Current timezone for this app.
@@ -1222,9 +1268,12 @@ class Celery(object):
         :setting:`timezone` setting.
         """
         conf = self.conf
-        tz = conf.timezone
-        if not tz:
-            return (timezone.get_timezone('UTC') if conf.enable_utc
-                    else timezone.local)
+        if not conf.timezone:
+            if conf.enable_utc:
+                return timezone.utc
+            else:
+                return timezone.local
         return timezone.get_timezone(conf.timezone)
+
+
 App = Celery  # noqa: E305 XXX compat

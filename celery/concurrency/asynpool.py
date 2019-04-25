@@ -20,10 +20,8 @@ import gc
 import os
 import select
 import socket
-import struct
 import sys
 import time
-
 from collections import deque, namedtuple
 from io import BytesIO
 from numbers import Integral
@@ -31,17 +29,18 @@ from pickle import HIGHEST_PROTOCOL
 from time import sleep
 from weakref import WeakValueDictionary, ref
 
-from billiard.pool import RUN, TERMINATE, ACK, NACK, WorkersJoined
 from billiard import pool as _pool
-from billiard.compat import buf_t, setblocking, isblocking
+from billiard.compat import buf_t, isblocking, setblocking
+from billiard.pool import ACK, NACK, RUN, TERMINATE, WorkersJoined
 from billiard.queues import _SimpleQueue
-from kombu.async import WRITE, ERR
+from kombu.asynchronous import ERR, WRITE
 from kombu.serialization import pickle as _pickle
 from kombu.utils.eventio import SELECT_BAD_FD
 from kombu.utils.functional import fxrange
 from vine import promise
 
 from celery.five import Counter, items, values
+from celery.platforms import pack, unpack, unpack_from
 from celery.utils.functional import noop
 from celery.utils.log import get_logger
 from celery.worker import state as worker_state
@@ -51,19 +50,15 @@ from celery.worker import state as worker_state
 
 try:
     from _billiard import read as __read__
-    from struct import unpack_from as _unpack_from
-    memoryview = memoryview
     readcanbuf = True
 
+    # unpack_from supports memoryview in 2.7.6 and 3.3+
     if sys.version_info[0] == 2 and sys.version_info < (2, 7, 6):
 
-        def unpack_from(fmt, view, _unpack_from=_unpack_from):  # noqa
+        def unpack_from(fmt, view, _unpack_from=unpack_from):  # noqa
             return _unpack_from(fmt, view.tobytes())  # <- memoryview
-    else:
-        # unpack_from supports memoryview in 2.7.6 and 3.3+
-        unpack_from = _unpack_from  # noqa
 
-except (ImportError, NameError):  # pragma: no cover
+except ImportError:  # pragma: no cover
 
     def __read__(fd, buf, size, read=os.read):  # noqa
         chunk = read(fd, size)
@@ -73,10 +68,10 @@ except (ImportError, NameError):  # pragma: no cover
         return n
     readcanbuf = False  # noqa
 
-    def unpack_from(fmt, iobuf, unpack=struct.unpack):  # noqa
+    def unpack_from(fmt, iobuf, unpack=unpack):  # noqa
         return unpack(fmt, iobuf.getvalue())  # <-- BytesIO
 
-__all__ = ['AsynPool']
+__all__ = ('AsynPool',)
 
 logger = get_logger(__name__)
 error, debug = logger.error, logger.debug
@@ -180,14 +175,25 @@ def _select(readers=None, writers=None, err=None, timeout=0,
     try:
         return poll(readers, writers, err, timeout)
     except (select.error, socket.error) as exc:
-        if exc.errno == errno.EINTR:
+        # Workaround for celery/celery#4513
+        try:
+            _errno = exc.errno
+        except AttributeError:
+            _errno = exc.args[0]
+
+        if _errno == errno.EINTR:
             return set(), set(), 1
-        elif exc.errno in SELECT_BAD_FD:
+        elif _errno in SELECT_BAD_FD:
             for fd in readers | writers | err:
                 try:
                     select.select([fd], [], [], 0)
                 except (select.error, socket.error) as exc:
-                    if getattr(exc, 'errno', None) not in SELECT_BAD_FD:
+                    try:
+                        _errno = exc.errno
+                    except AttributeError:
+                        _errno = exc.args[0]
+
+                    if _errno not in SELECT_BAD_FD:
                         raise
                     readers.discard(fd)
                     writers.discard(fd)
@@ -244,7 +250,7 @@ class ResultHandler(_pool.ResultHandler):
                            else EOFError())
                 Hr += n
 
-        body_size, = unpack_from(b'>i', bufv)
+        body_size, = unpack_from('>i', bufv)
         if readcanbuf:
             buf = bytearray(body_size)
             bufv = memoryview(buf)
@@ -511,11 +517,11 @@ class AsynPool(_pool.Pool):
             _discard_tref(R._job)
         self.on_timeout_cancel = on_timeout_cancel
 
-    def _on_soft_timeout(self, job, soft, hard, hub, now=time.time):
+    def _on_soft_timeout(self, job, soft, hard, hub):
         # only used by async pool.
         if hard:
-            self._tref_for_id[job] = hub.call_at(
-                now() + (hard - soft), self._on_hard_timeout, job,
+            self._tref_for_id[job] = hub.call_later(
+                hard - soft, self._on_hard_timeout, job,
             )
         try:
             result = self._cache[job]
@@ -650,7 +656,7 @@ class AsynPool(_pool.Pool):
         self.on_process_down = on_process_down
 
     def _create_write_handlers(self, hub,
-                               pack=struct.pack, dumps=_pickle.dumps,
+                               pack=pack, dumps=_pickle.dumps,
                                protocol=HIGHEST_PROTOCOL):
         """Create handlers used to write data to child processes."""
         fileno_to_inq = self._fileno_to_inq
@@ -731,10 +737,10 @@ class AsynPool(_pool.Pool):
                     fileno_to_inq.pop(fd, None)
                     active_writes.discard(fd)
                     all_inqueues.discard(fd)
-                    hub_remove(fd)
             except KeyError:
                 pass
         self.on_inqueue_close = on_inqueue_close
+        self.hub_remove = hub_remove
 
         def schedule_writes(ready_fds, total_write_count=[0]):
             # Schedule write operation to ready file descriptor.
@@ -1027,7 +1033,6 @@ class AsynPool(_pool.Pool):
 
     def on_shrink(self, n):
         """Shrink the pool by ``n`` processes."""
-        pass
 
     def create_process_queues(self):
         """Create new in, out, etc. queues, returned as a tuple."""
@@ -1096,7 +1101,9 @@ class AsynPool(_pool.Pool):
             'avg': per(total / len(self.write_stats) if total else 0, total),
             'all': ', '.join(per(v, total) for v in vals),
             'raw': ', '.join(map(str, vals)),
-            'strategy': SCHED_STRATEGY_TO_NAME[self.sched_strategy],
+            'strategy': SCHED_STRATEGY_TO_NAME.get(
+                self.sched_strategy, self.sched_strategy,
+            ),
             'inqueues': {
                 'total': len(self._all_inqueues),
                 'active': len(self._active_writes),
@@ -1239,6 +1246,7 @@ class AsynPool(_pool.Pool):
             if queue:
                 for sock in (queue._reader, queue._writer):
                     if not sock.closed:
+                        self.hub_remove(sock)
                         try:
                             sock.close()
                         except (IOError, OSError):
@@ -1246,7 +1254,7 @@ class AsynPool(_pool.Pool):
         return removed
 
     def _create_payload(self, type_, args,
-                        dumps=_pickle.dumps, pack=struct.pack,
+                        dumps=_pickle.dumps, pack=pack,
                         protocol=HIGHEST_PROTOCOL):
         body = dumps((type_, args), protocol=protocol)
         size = len(body)

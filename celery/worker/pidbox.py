@@ -1,15 +1,19 @@
 """Worker Pidbox (remote control)."""
 from __future__ import absolute_import, unicode_literals
+
 import socket
 import threading
+
 from kombu.common import ignore_errors
 from kombu.utils.encoding import safe_str
+
 from celery.utils.collections import AttributeDict
 from celery.utils.functional import pass1
 from celery.utils.log import get_logger
+
 from . import control
 
-__all__ = ['Pidbox', 'gPidbox']
+__all__ = ('Pidbox', 'gPidbox')
 
 logger = get_logger(__name__)
 debug, error, info = logger.debug, logger.error, logger.info
@@ -105,7 +109,7 @@ class gPidbox(Pidbox):
         shutdown = self._node_shutdown = threading.Event()
         stopped = self._node_stopped = threading.Event()
         try:
-            with c.connect() as connection:
+            with c.connection_for_read() as connection:
                 info('pidbox: Connected to %s.', connection.as_uri())
                 self._do_reset(c, connection)
                 while not shutdown.is_set() and c.connection:

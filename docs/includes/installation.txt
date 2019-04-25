@@ -82,11 +82,17 @@ Transports and Backends
 :``celery[couchbase]``:
     for using Couchbase as a result backend.
 
+:``celery[arangodb]``:
+    for using ArangoDB as a result backend.
+
 :``celery[elasticsearch]``:
     for using Elasticsearch as a result backend.
 
 :``celery[riak]``:
     for using Riak as a result backend.
+
+:``celery[dynamodb]``:
+    for using AWS DynamoDB as a result backend.
 
 :``celery[zookeeper]``:
     for using Zookeeper as a message transport.
@@ -117,7 +123,7 @@ Downloading and installing from source
 
 Download the latest version of Celery from PyPI:
 
-http://pypi.python.org/pypi/celery/
+https://pypi.org/project/celery/
 
 You can install it by doing the following,:
 
@@ -158,4 +164,4 @@ pip commands:
 With git
 ~~~~~~~~
 
-Please the Contributing section.
+Please see the :ref:`Contributing <contributing>` section.

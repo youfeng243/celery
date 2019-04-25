@@ -1,11 +1,13 @@
 """Create Celery app instances used for testing."""
 from __future__ import absolute_import, unicode_literals
+
 import weakref
 from contextlib import contextmanager
 from copy import deepcopy
+
 from kombu.utils.imports import symbol_by_name
-from celery import Celery
-from celery import _state
+
+from celery import Celery, _state
 
 #: Contains the default configuration values for the test app.
 DEFAULT_TEST_CONFIG = {
@@ -15,7 +17,8 @@ DEFAULT_TEST_CONFIG = {
     'enable_utc': True,
     'timezone': 'UTC',
     'broker_url': 'memory://',
-    'result_backend': 'cache+memory://'
+    'result_backend': 'cache+memory://',
+    'broker_heartbeat': 0,
 }
 
 

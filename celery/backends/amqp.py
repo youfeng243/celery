@@ -3,21 +3,20 @@
 from __future__ import absolute_import, unicode_literals
 
 import socket
-
 from collections import deque
 from operator import itemgetter
 
-from kombu import Exchange, Queue, Producer, Consumer
+from kombu import Consumer, Exchange, Producer, Queue
 
 from celery import states
 from celery.exceptions import TimeoutError
-from celery.five import range, monotonic
+from celery.five import monotonic, range
 from celery.utils import deprecated
 from celery.utils.log import get_logger
 
 from .base import BaseBackend
 
-__all__ = ['BacklogLimitExceeded', 'AMQPBackend']
+__all__ = ('BacklogLimitExceeded', 'AMQPBackend')
 
 logger = get_logger(__name__)
 
@@ -142,12 +141,11 @@ class AMQPBackend(BaseBackend):
         if cache and cached_meta and \
                 cached_meta['status'] in READY_STATES:
             return cached_meta
-        else:
-            try:
-                return self.consume(task_id, timeout=timeout, no_ack=no_ack,
-                                    on_interval=on_interval)
-            except socket.timeout:
-                raise TimeoutError('The operation timed out.')
+        try:
+            return self.consume(task_id, timeout=timeout, no_ack=no_ack,
+                                on_interval=on_interval)
+        except socket.timeout:
+            raise TimeoutError('The operation timed out.')
 
     def get_task_meta(self, task_id, backlog_limit=1000):
         # Polling and using basic_get
@@ -299,7 +297,8 @@ class AMQPBackend(BaseBackend):
         raise NotImplementedError(
             'delete_group is not supported by this backend.')
 
-    def __reduce__(self, args=(), kwargs={}):
+    def __reduce__(self, args=(), kwargs=None):
+        kwargs = kwargs if kwargs else {}
         kwargs.update(
             connection=self._connection,
             exchange=self.exchange.name,

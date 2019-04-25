@@ -1,14 +1,9 @@
 from __future__ import absolute_import, unicode_literals
+
 import pytest
-from celery.utils.text import (
-    abbr,
-    abbrtask,
-    ensure_newlines,
-    indent,
-    pretty,
-    truncate,
-    truncate_bytes,
-)
+
+from celery.utils.text import (abbr, abbrtask, ensure_newlines, indent,
+                               pretty, truncate)
 
 RANDTEXT = """\
 The quick brown
@@ -64,15 +59,6 @@ class test_Info:
 ])
 def test_truncate_text(s, maxsize, expected):
     assert truncate(s, maxsize) == expected
-
-
-@pytest.mark.parametrize('s,maxsize,expected', [
-    (b'ABCDEFGHI', 3, b'ABC...'),
-    (b'ABCDEFGHI', 10, b'ABCDEFGHI'),
-
-])
-def test_truncate_bytes(s, maxsize, expected):
-    assert truncate_bytes(s, maxsize) == expected
 
 
 @pytest.mark.parametrize('args,expected', [

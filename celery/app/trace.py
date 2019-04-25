@@ -6,6 +6,32 @@ errors are recorded, handlers are applied and so on.
 """
 from __future__ import absolute_import, unicode_literals
 
+import logging
+import os
+import sys
+from collections import namedtuple
+from warnings import warn
+
+from billiard.einfo import ExceptionInfo
+from kombu.exceptions import EncodeError
+from kombu.serialization import loads as loads_message
+from kombu.serialization import prepare_accept_content
+from kombu.utils.encoding import safe_repr, safe_str
+
+from celery import current_app, group, signals, states
+from celery._state import _task_stack
+from celery.app.task import Context
+from celery.app.task import Task as BaseTask
+from celery.exceptions import Ignore, InvalidTaskError, Reject, Retry
+from celery.five import monotonic, text_t
+from celery.utils.log import get_logger
+from celery.utils.nodenames import gethostname
+from celery.utils.objects import mro_lookup
+from celery.utils.saferepr import saferepr
+from celery.utils.serialization import (get_pickleable_etype,
+                                        get_pickleable_exception,
+                                        get_pickled_exception)
+
 # ## ---
 # This is the heart of the worker, the inner loop so to speak.
 # It used to be split up into nice little classes and methods,
@@ -17,40 +43,13 @@ from __future__ import absolute_import, unicode_literals
 # pylint: disable=broad-except
 # We know what we're doing...
 
-import logging
-import os
-import sys
 
-from collections import namedtuple
-from warnings import warn
-
-from billiard.einfo import ExceptionInfo
-from kombu.exceptions import EncodeError
-from kombu.serialization import loads as loads_message, prepare_accept_content
-from kombu.utils.encoding import safe_repr, safe_str
-
-from celery import current_app, group
-from celery import states, signals
-from celery._state import _task_stack
-from celery.app.task import Task as BaseTask, Context
-from celery.exceptions import Ignore, Reject, Retry, InvalidTaskError
-from celery.five import monotonic, text_t
-from celery.utils.log import get_logger
-from celery.utils.nodenames import gethostname
-from celery.utils.objects import mro_lookup
-from celery.utils.saferepr import saferepr
-from celery.utils.serialization import (
-    get_pickleable_exception, get_pickled_exception, get_pickleable_etype,
-)
-from celery.utils.text import truncate
-
-__all__ = [
+__all__ = (
     'TraceInfo', 'build_tracer', 'trace_task',
     'setup_worker_optimizations', 'reset_worker_optimizations',
-]
+)
 
 logger = get_logger(__name__)
-info = logger.info
 
 #: Format string used to log task success.
 LOG_SUCCESS = """\
@@ -117,6 +116,14 @@ _patched = {}
 trace_ok_t = namedtuple('trace_ok_t', ('retval', 'info', 'runtime', 'retstr'))
 
 
+def info(fmt, context):
+    """Log 'fmt % context' with severity 'INFO'.
+
+    'context' is also passed in extra with key 'data' for custom handlers.
+    """
+    logger.info(fmt, context, extra={'data': context})
+
+
 def task_has_custom(task, attr):
     """Return true if the task overrides ``attr``."""
     return mro_lookup(task.__class__, attr, stop={BaseTask, object},
@@ -134,6 +141,13 @@ def get_log_policy(task, einfo, exc):
         if task.throws and isinstance(exc, task.throws):
             return log_policy_expected
         return log_policy_unexpected
+
+
+def get_task_name(request, default):
+    """Use 'shadow' in request for the task name if applicable."""
+    # request.shadow could be None or an empty string.
+    # If so, we should use default.
+    return getattr(request, 'shadow', None) or default
 
 
 class TraceInfo(object):
@@ -180,7 +194,7 @@ class TraceInfo(object):
                                     reason=reason, einfo=einfo)
             info(LOG_RETRY, {
                 'id': req.id,
-                'name': task.name,
+                'name': get_task_name(req, task.name),
                 'exc': text_t(reason),
             })
             return einfo
@@ -228,7 +242,7 @@ class TraceInfo(object):
         context = {
             'hostname': req.hostname,
             'id': req.id,
-            'name': task.name,
+            'name': get_task_name(req, task.name),
             'exc': exception,
             'traceback': traceback,
             'args': sargs,
@@ -244,8 +258,8 @@ class TraceInfo(object):
 
 def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                  Info=TraceInfo, eager=False, propagate=False, app=None,
-                 monotonic=monotonic, truncate=truncate,
-                 trace_ok_t=trace_ok_t, IGNORE_STATES=IGNORE_STATES):
+                 monotonic=monotonic, trace_ok_t=trace_ok_t,
+                 IGNORE_STATES=IGNORE_STATES):
     """Return a function that traces task execution.
 
     Catches all exceptions and updates result backend with the
@@ -284,6 +298,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
     track_started = not eager and (task.track_started and not ignore_result)
     publish_result = not eager and not ignore_result
     hostname = hostname or gethostname()
+    inherit_parent_priority = app.conf.task_inherit_parent_priority
 
     loader_task_init = loader.on_task_init
     loader_cleanup = loader.on_process_cleanup
@@ -350,6 +365,8 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
             task_request = Context(request or {}, args=args,
                                    called_directly=False, kwargs=kwargs)
             root_id = task_request.root_id or uuid
+            task_priority = task_request.delivery_info.get('priority') if \
+                inherit_parent_priority else None
             push_request(task_request)
             try:
                 # -*- PRE -*-
@@ -380,7 +397,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                         task_request, exc, uuid, RETRY, call_errbacks=False)
                 except Exception as exc:
                     I, R, state, retval = on_error(task_request, exc, uuid)
-                except BaseException as exc:
+                except BaseException:
                     raise
                 else:
                     try:
@@ -405,15 +422,18 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                                     group_.apply_async(
                                         (retval,),
                                         parent_id=uuid, root_id=root_id,
+                                        priority=task_priority
                                     )
                                 if sigs:
                                     group(sigs, app=app).apply_async(
                                         (retval,),
                                         parent_id=uuid, root_id=root_id,
+                                        priority=task_priority
                                     )
                             else:
                                 signature(callbacks[0], app=app).apply_async(
                                     (retval,), parent_id=uuid, root_id=root_id,
+                                    priority=task_priority
                                 )
 
                         # execute first task in chain
@@ -423,6 +443,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                             _chsig.apply_async(
                                 (retval,), chain=chain,
                                 parent_id=uuid, root_id=root_id,
+                                priority=task_priority
                             )
                         mark_as_done(
                             uuid, retval, task_request, publish_result,
@@ -438,8 +459,10 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                             send_success(sender=task, result=retval)
                         if _does_info:
                             info(LOG_SUCCESS, {
-                                'id': uuid, 'name': name,
-                                'return_value': Rstr, 'runtime': T,
+                                'id': uuid,
+                                'name': get_task_name(task_request, name),
+                                'return_value': Rstr,
+                                'runtime': T,
                             })
 
                 # -* POST *-
@@ -509,6 +532,8 @@ def _trace_task_ret(name, uuid, request, body, content_type,
     R, I, T, Rstr = trace_task(app.tasks[name],
                                uuid, args, kwargs, request, app=app)
     return (1, R, T) if I else (0, Rstr, T)
+
+
 trace_task_ret = _trace_task_ret  # noqa: E305
 
 

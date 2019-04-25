@@ -1,8 +1,11 @@
 """Fixtures and testing utilities for :pypi:`py.test <pytest>`."""
 from __future__ import absolute_import, unicode_literals
+
 import os
-import pytest
 from contextlib import contextmanager
+
+import pytest
+
 from .testing import worker
 from .testing.app import TestApp, setup_default_app
 
@@ -13,8 +16,7 @@ NO_WORKER = os.environ.get('NO_WORKER')
 
 
 @contextmanager
-def _create_app(request,
-                enable_logging=False,
+def _create_app(enable_logging=False,
                 use_trap=False,
                 parameters={},
                 **config):
@@ -26,18 +28,7 @@ def _create_app(request,
         config=config,
         **parameters
     )
-    # request.module is not defined for session
-    _module = getattr(request, 'module', None)
-    _cls = getattr(request, 'cls', None)
-    _function = getattr(request, 'function', None)
     with setup_default_app(test_app, use_trap=use_trap):
-        is_not_contained = any([
-            not getattr(_module, 'app_contained', True),
-            not getattr(_cls, 'app_contained', True),
-            not getattr(_function, 'app_contained', True)
-        ])
-        if is_not_contained:
-            test_app.set_current()
         yield test_app
 
 
@@ -60,10 +51,9 @@ def celery_session_app(request,
                        use_celery_app_trap):
     # type: (Any) -> Celery
     """Session Fixture: Return app for session fixtures."""
-    mark = request.node.get_marker('celery')
+    mark = request.node.get_closest_marker('celery')
     config = dict(celery_config, **mark.kwargs if mark else {})
-    with _create_app(request,
-                     enable_logging=celery_enable_logging,
+    with _create_app(enable_logging=celery_enable_logging,
                      use_trap=use_celery_app_trap,
                      parameters=celery_parameters,
                      **config) as app:
@@ -74,15 +64,19 @@ def celery_session_app(request,
 
 
 @pytest.fixture(scope='session')
-def celery_session_worker(request, celery_session_app,
-                          celery_includes, celery_worker_pool):
+def celery_session_worker(request,
+                          celery_session_app,
+                          celery_includes,
+                          celery_worker_pool,
+                          celery_worker_parameters):
     # type: (Any, Celery, Sequence[str], str) -> WorkController
     """Session Fixture: Start worker that lives throughout test suite."""
     if not NO_WORKER:
         for module in celery_includes:
             celery_session_app.loader.import_task_module(module)
         with worker.start_worker(celery_session_app,
-                                 pool=celery_worker_pool) as w:
+                                 pool=celery_worker_pool,
+                                 **celery_worker_parameters) as w:
             yield w
 
 
@@ -137,6 +131,19 @@ def celery_parameters():
     return {}
 
 
+@pytest.fixture(scope='session')
+def celery_worker_parameters():
+    # type: () -> Mapping[str, Any]
+    """Redefine this fixture to change the init parameters of Celery workers.
+
+    This can be used e. g. to define queues the worker will consume tasks from.
+
+    The dict returned by your fixture will then be used
+    as parameters when instantiating :class:`~celery.worker.WorkController`.
+    """
+    return {}
+
+
 @pytest.fixture()
 def celery_app(request,
                celery_config,
@@ -144,10 +151,9 @@ def celery_app(request,
                celery_enable_logging,
                use_celery_app_trap):
     """Fixture creating a Celery application instance."""
-    mark = request.node.get_marker('celery')
+    mark = request.node.get_closest_marker('celery')
     config = dict(celery_config, **mark.kwargs if mark else {})
-    with _create_app(request,
-                     enable_logging=celery_enable_logging,
+    with _create_app(enable_logging=celery_enable_logging,
                      use_trap=use_celery_app_trap,
                      parameters=celery_parameters,
                      **config) as app:
@@ -155,13 +161,19 @@ def celery_app(request,
 
 
 @pytest.fixture()
-def celery_worker(request, celery_app, celery_includes, celery_worker_pool):
+def celery_worker(request,
+                  celery_app,
+                  celery_includes,
+                  celery_worker_pool,
+                  celery_worker_parameters):
     # type: (Any, Celery, Sequence[str], str) -> WorkController
     """Fixture: Start worker in a thread, stop it when the test returns."""
     if not NO_WORKER:
         for module in celery_includes:
             celery_app.loader.import_task_module(module)
-        with worker.start_worker(celery_app, pool=celery_worker_pool) as w:
+        with worker.start_worker(celery_app,
+                                 pool=celery_worker_pool,
+                                 **celery_worker_parameters) as w:
             yield w
 
 

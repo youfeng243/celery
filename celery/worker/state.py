@@ -7,9 +7,9 @@ statistics, and revoked tasks.
 from __future__ import absolute_import, print_function, unicode_literals
 
 import os
-import sys
 import platform
 import shelve
+import sys
 import weakref
 import zlib
 
@@ -21,11 +21,11 @@ from celery.exceptions import WorkerShutdown, WorkerTerminate
 from celery.five import Counter
 from celery.utils.collections import LimitedSet
 
-__all__ = [
+__all__ = (
     'SOFTWARE_INFO', 'reserved_requests', 'active_requests',
     'total_count', 'revoked', 'task_reserved', 'maybe_shutdown',
-    'task_accepted', 'task_reserved', 'task_ready', 'Persistent',
-]
+    'task_accepted', 'task_ready', 'Persistent',
+)
 
 #: Worker software/platform information.
 SOFTWARE_INFO = {
@@ -132,9 +132,9 @@ if C_BENCH:  # pragma: no cover
         def on_shutdown():
             if bench_first is not None and bench_last is not None:
                 print('- Time spent in benchmark: {0!r}'.format(
-                      bench_last - bench_first))
+                    bench_last - bench_first))
                 print('- Avg: {0}'.format(
-                      sum(bench_sample) / len(bench_sample)))
+                    sum(bench_sample) / len(bench_sample)))
                 memdump()
 
     def task_reserved(request):  # noqa
@@ -217,22 +217,22 @@ class Persistent(object):
     def _sync_with(self, d):
         self._revoked_tasks.purge()
         d.update({
-            b'__proto__': 3,
-            b'zrevoked': self.compress(self._dumps(self._revoked_tasks)),
-            b'clock': self.clock.forward() if self.clock else 0,
+            str('__proto__'): 3,
+            str('zrevoked'): self.compress(self._dumps(self._revoked_tasks)),
+            str('clock'): self.clock.forward() if self.clock else 0,
         })
         return d
 
     def _merge_clock(self, d):
         if self.clock:
-            d[b'clock'] = self.clock.adjust(d.get(b'clock') or 0)
+            d[str('clock')] = self.clock.adjust(d.get(str('clock')) or 0)
 
     def _merge_revoked(self, d):
         try:
-            self._merge_revoked_v3(d[b'zrevoked'])
+            self._merge_revoked_v3(d[str('zrevoked')])
         except KeyError:
             try:
-                self._merge_revoked_v2(d.pop(b'revoked'))
+                self._merge_revoked_v2(d.pop(str('revoked')))
             except KeyError:
                 pass
         # purge expired items at boot

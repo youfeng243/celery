@@ -71,13 +71,14 @@ in this example:
 
         @patch('proj.tasks.Product.order')
         @patch('proj.tasks.send_order.retry')
-        def test_failure(send_order_retry, product_order):
+        def test_failure(self, send_order_retry, product_order):
             product = Product.objects.create(
                 name='Foo',
             )
 
-            # set a side effect on the patched method
-            # so that it raises the error we want.
+            # Set a side effect on the patched methods
+            # so that they raise the errors we want.
+            send_order_retry.side_effect = Retry()
             product_order.side_effect = OperationalError()
 
             with raises(Retry):
@@ -154,7 +155,7 @@ Example:
 
 .. code-block:: python
 
-    # Put this in your confttest.py
+    # Put this in your conftest.py
     @pytest.fixture(scope='session')
     def celery_config():
         return {
@@ -213,6 +214,28 @@ Example:
         return {
             'task_cls':  my.package.MyCustomTaskClass,
             'strict_typing': False,
+        }
+
+``celery_worker_parameters`` - Override to setup Celery worker parameters.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You can redefine this fixture to change the ``__init__`` parameters of test
+Celery workers. These are directly passed to
+:class:`~celery.worker.WorkController` when it is instantiated.
+
+The config returned by your fixture will then be used
+to configure the :func:`celery_worker`, and :func:`celery_session_worker`
+fixtures.
+
+Example:
+
+.. code-block:: python
+
+    @pytest.fixture(scope='session')
+    def celery_worker_parameters():
+        return {
+            'queues':  ('high-prio', 'low-prio'),
+            'exclude_queues': ('celery'),
         }
 
 

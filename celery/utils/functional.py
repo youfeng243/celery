@@ -4,26 +4,21 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 import inspect
 import sys
-
 from functools import partial
 from itertools import chain, islice
 
-from kombu.utils.functional import (
-    LRUCache, dictfilter, lazy, maybe_evaluate, memoize,
-    is_list, maybe_list,
-)
+from kombu.utils.functional import (LRUCache, dictfilter, is_list, lazy,
+                                    maybe_evaluate, maybe_list, memoize)
 from vine import promise
 
 from celery.five import UserList, getfullargspec, range
 
-__all__ = [
+__all__ = (
     'LRUCache', 'is_list', 'maybe_list', 'memoize', 'mlazy', 'noop',
     'first', 'firstmethod', 'chunks', 'padlist', 'mattrgetter', 'uniq',
     'regen', 'dictfilter', 'lazy', 'maybe_evaluate', 'head_from_fun',
     'maybe', 'fun_accepts_kwargs',
-]
-
-IS_PY3 = sys.version_info[0] == 3
+)
 
 FUNHEAD_TEMPLATE = """
 def {fun_name}({fun_args}):
@@ -63,7 +58,6 @@ def noop(*args, **kwargs):
 
     Takes any arguments/keyword arguments and does nothing.
     """
-    pass
 
 
 def pass1(arg, *args, **kwargs):
@@ -234,11 +228,28 @@ def _argsfromspec(spec, replace_defaults=True):
         optional = list(zip(spec.args[-split:], defaults))
     else:
         positional, optional = spec.args, []
+
+    varargs = spec.varargs
+    varkw = spec.varkw
+    if spec.kwonlydefaults:
+        split = len(spec.kwonlydefaults)
+        kwonlyargs = spec.kwonlyargs[:-split]
+        if replace_defaults:
+            kwonlyargs_optional = [
+                (kw, i) for i, kw in enumerate(spec.kwonlyargs[-split:])]
+        else:
+            kwonlyargs_optional = list(spec.kwonlydefaults.items())
+    else:
+        kwonlyargs, kwonlyargs_optional = spec.kwonlyargs, []
+
     return ', '.join(filter(None, [
         ', '.join(positional),
         ', '.join('{0}={1}'.format(k, v) for k, v in optional),
-        '*{0}'.format(spec.varargs) if spec.varargs else None,
-        '**{0}'.format(spec.varkw) if spec.varkw else None,
+        '*{0}'.format(varargs) if varargs else None,
+        '*' if (kwonlyargs or kwonlyargs_optional) and not varargs else None,
+        ', '.join(kwonlyargs) if kwonlyargs else None,
+        ', '.join('{0}="{1}"'.format(k, v) for k, v in kwonlyargs_optional),
+        '**{0}'.format(varkw) if varkw else None,
     ]))
 
 
@@ -249,7 +260,12 @@ def head_from_fun(fun, bound=False, debug=False):
     # in pure-Python.  Instead we use exec to create a new function
     # with an empty body, meaning it has the same performance as
     # as just calling a function.
-    if not inspect.isfunction(fun) and hasattr(fun, '__call__'):
+    is_function = inspect.isfunction(fun)
+    is_callable = hasattr(fun, '__call__')
+    is_cython = fun.__class__.__name__ == 'cython_function_or_method'
+    is_method = inspect.ismethod(fun)
+
+    if not is_function and is_callable and not is_method and not is_cython:
         name, fun = fun.__class__.__name__, fun.__call__
     else:
         name = fun.__name__

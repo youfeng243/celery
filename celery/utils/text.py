@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """Text formatting utilities."""
 from __future__ import absolute_import, unicode_literals
+
 import re
-from collections import Callable
 from functools import partial
-from textwrap import fill
 from pprint import pformat
+from textwrap import fill
+
 from celery.five import string_t
 
-__all__ = [
+try:
+    from collections.abc import Callable
+except ImportError:
+    # TODO: Remove this when we drop Python 2.7 support
+    from collections import Callable
+
+
+__all__ = (
     'abbr', 'abbrtask', 'dedent', 'dedent_initial',
     'ensure_newlines', 'ensure_sep',
     'fill_paragraphs', 'indent', 'join',
     'pluralize', 'pretty', 'str_to_list', 'simple_format', 'truncate',
-]
+)
 
 UNKNOWN_SIMPLE_FORMAT_KEY = """
 Unknown format %{0} in string {1!r}.
@@ -98,13 +106,6 @@ def truncate(s, maxlen=128, suffix='...'):
     """Truncate text to a maximum number of characters."""
     if maxlen and len(s) >= maxlen:
         return s[:maxlen].rsplit(' ', 1)[0] + suffix
-    return s
-
-
-def truncate_bytes(s, maxlen=128, suffix=b'...'):
-    # type: (bytes, int, bytes) -> bytes
-    if maxlen and len(s) >= maxlen:
-        return s[:maxlen].rsplit(b' ', 1)[0] + suffix
     return s
 
 
