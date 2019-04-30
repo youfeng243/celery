@@ -70,7 +70,7 @@ bump-major:
 	bumpversion major
 
 release:
-	python setup.py register sdist bdist_wheel upload --sign --identity="$(PGPIDENT)"
+	python setup.py register sdist bdist_wheel upload --sign --identity=$(PGPIDENT)
 
 Documentation:
 	(cd "$(SPHINX_DIR)"; $(MAKE) html)
